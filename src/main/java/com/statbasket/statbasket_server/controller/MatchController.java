@@ -6,6 +6,12 @@ import com.statbasket.statbasket_server.repository.MatchRepository;
 import com.statbasket.statbasket_server.repository.TeamRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import java.util.Map;
+import java.util.HashMap;
 
 import java.util.List;
 
@@ -66,17 +72,15 @@ public class MatchController {
     public ResponseEntity<Match> updateMatch(@PathVariable Integer id, @RequestBody Match matchDetails) {
         return matchRepository.findById(id)
                 .map(existingMatch -> {
-                    // Проверяем и привязываем связанные сущности, как в POST
                     var event = eventRepository.findById(matchDetails.getEvent().getId()).orElse(null);
                     var team1 = teamRepository.findById(matchDetails.getTeam1().getId()).orElse(null);
                     var team2 = teamRepository.findById(matchDetails.getTeam2().getId()).orElse(null);
 
                     if (event == null || team1 == null || team2 == null) {
-                        // Возвращаем badRequest, если ID связанных сущностей неверны
                         return ResponseEntity.badRequest().<Match>build();
                     }
 
-                    // Обновляем поля существующего матча
+                    // Обновляем базовые поля
                     existingMatch.setDate(matchDetails.getDate());
                     existingMatch.setTeam1Score(matchDetails.getTeam1Score());
                     existingMatch.setTeam2Score(matchDetails.getTeam2Score());
@@ -85,10 +89,23 @@ public class MatchController {
                     existingMatch.setTeam1(team1);
                     existingMatch.setTeam2(team2);
 
+                    // --- НОВЫЙ БЛОК: ОБНОВЛЕНИЕ СТАТИСТИКИ ИГРОКОВ ---
+                    // 1. Очищаем старую статистику (JPA удалит её из базы благодаря orphanRemoval)
+                    existingMatch.getPlayerStats().clear();
+
+                    // 2. Если клиент прислал новую статистику - добавляем её
+                    if (matchDetails.getPlayerStats() != null) {
+                        // Каждой записи статистики указываем, какому матчу она принадлежит
+                        matchDetails.getPlayerStats().forEach(stat -> stat.setMatch(existingMatch));
+                        // Добавляем весь массив в наш матч
+                        existingMatch.getPlayerStats().addAll(matchDetails.getPlayerStats());
+                    }
+                    // ---------------------------------------------------
+
                     Match updatedMatch = matchRepository.save(existingMatch);
                     return ResponseEntity.ok(updatedMatch);
                 })
-                .orElse(ResponseEntity.notFound().build()); // Матч с таким ID не найден
+                .orElse(ResponseEntity.notFound().build());
     }
 
     /**
@@ -101,5 +118,22 @@ public class MatchController {
         }
         matchRepository.deleteById(id);
         return ResponseEntity.noContent().build(); // Стандартный ответ для успешного DELETE
+    }
+
+    @GetMapping("/paged")
+    public ResponseEntity<Map<String, Object>> getPagedMatches(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "15") int size) {
+
+        // Сортировка: сначала новые даты. Если даты одинаковые - сортируем по ID (по убыванию)
+        Pageable paging = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "date", "id"));
+        Page<Match> pageMatches = matchRepository.findAll(paging);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("matches", pageMatches.getContent());      // Сами матчи (15 штук)
+        response.put("currentPage", pageMatches.getNumber());   // Текущая страница
+        response.put("totalPages", pageMatches.getTotalPages());// Всего страниц
+
+        return ResponseEntity.ok(response);
     }
 }
